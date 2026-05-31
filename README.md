@@ -1,155 +1,133 @@
-# TENTACLES — Autonomous Bug Bounty Agent
+# Tentacles
 
-Tentacles is an autonomous penetration testing agent built for **authorized bug bounty hunting** on platforms like HackerOne, Bugcrowd, and Intigriti. It finds payable vulnerabilities, writes platform-formatted reports with working PoCs, and learns across sessions.
+Tentacles is a self-hosted **recon and tool-sweep platform** for authorized security testing. You point it at a domain, it runs baseline recon automatically, then runs a full sweep of security tools across everything it found — all from a web dashboard, with results organized per subdomain.
 
-> ⚠️ Only use Tentacles on systems you are explicitly authorized to test.
+It is **not** an AI agent and does not call any external LLM service. It is a workflow runner around a curated set of well-known security tools.
+
+> ⚠️ Only use Tentacles against systems you are explicitly authorized to test (your own assets, or targets covered by a bug bounty program's scope).
 
 ---
 
-## What Tentacles does
+## What it does
 
-Every session runs a full pipeline automatically:
+When you create a workbench for a target, Tentacles runs a **6-phase baseline recon** automatically:
 
-- **12-phase recon** — subdomains, ports, JS secrets, CORS, takeover, parameters, API endpoints
-- **Application comprehension** — reads the app (public + authenticated pages, Swagger specs, JS analysis) and generates specific business logic hypotheses
-- **OSINT** — GitHub secrets, Google dorks, CVE correlation, Shodan host lookup
-- **60+ automated test suites** — injection, auth bypass, business logic, API security
-- **Exploitation depth** — deepens evidence after confirmation (dump DB tables, probe metadata, etc.)
-- **Platform-formatted reports** — HackerOne, Bugcrowd, Intigriti, YesWeHack formats
+1. Subdomain enumeration
+2. DNS resolution + CNAME checks (dangling-CNAME / takeover candidates)
+3. Port scanning
+4. HTTP probing + CDN detection
+5. URL collection
+6. Parameter extraction
+
+If auto-sweep is enabled (default), it then queues a **Full Tool Sweep** — a 13-stage pipeline that runs the right tool against the right recon output in dependency order:
+
+| Stage | Tool | What it does |
+|-------|------|--------------|
+| Tech fingerprint | whatweb | Identifies stacks, CMSes, frameworks |
+| Screenshots | gowitness | Captures every alive host |
+| TLS/SSL | testssl.sh | Cert + protocol + cipher audit |
+| Takeover check | subzy | Subdomain takeover detection |
+| Site mirror | wget | Crawls HTML for forms, comments, URLs |
+| JS & secrets | js_analyzer + trufflehog | Pulls JS, extracts endpoints + secrets |
+| Parameter discovery | arjun | Finds undocumented parameters |
+| Directory fuzzing | ffuf | Content discovery |
+| Vulnerability scan | nuclei | Template-based vuln detection |
+| Reflection scan | SPINEL | Reflected-input detection across query, headers, cookies, form, JSON |
+| WAF detection | wafw00f | Identifies WAFs in front of hosts |
+| Cloud buckets | s3scanner | Open bucket discovery |
+| GitHub recon | trufflehog | Secrets in the target's public repos (needs a PAT) |
+
+Sweeps run through a global queue (max 3 concurrent) so you can launch several targets without overloading the box. Each sweep supports stealth mode (rotating user agents, lower rates, Nuclei downgrade) and speed presets (standard / slow / glacial).
+
+Everything is browsable in the dashboard: results **by subdomain** or **by category**, a Findings view that aggregates tool output, a Tool Runs log, and a one-click zip export of any workbench.
 
 ---
 
 ## Requirements
 
-- **VPS**: Ubuntu 22.04 LTS recommended (20.04, 24.04, Debian 11+ also work)
+- **OS**: Ubuntu 22.04 LTS recommended (20.04, 24.04, Debian 11+ also work)
 - **RAM**: 2GB minimum, 4GB recommended
 - **CPU**: 2 cores minimum
 - **Root access**: required for tool installation
-- **Ports open**: 4000 (API), 5173 (frontend), 7331 (blind XSS callbacks)
+- **Open ports**: 4000 (API), 5173 (web UI)
 
 ---
 
-## Quick Start
+## Quick start
 
-### Step 1 — Upload and extract on your VPS
+### 1. Upload and extract on your server
 
 ```bash
-# Upload Tentacles.tar to your VPS, then:
-tar -xf Tentacles.tar
+# Upload Tentacles.tar.gz to your server, then:
+tar -xzf Tentacles.tar.gz
 cd tentacles-backend
 ```
 
-### Step 2 — Run the setup script (installs everything)
+### 2. Run the installer
 
 ```bash
-sudo bash scripts/setup.sh
+sudo bash run.sh
 ```
 
-This installs: Node.js, Go, all security tools (subfinder, httpx, nuclei, ffuf, gobuster, katana, dalfox, sqlmap, arjun, gau, etc.), SecLists wordlists, creates `/opt/tentacles/` directories, and sets up a systemd service.
+`run.sh` installs Node.js, Go, and every security tool in the sweep pipeline (subfinder, httpx, ffuf, dnsx, katana, nuclei, gowitness, arjun, trufflehog, s3scanner, and the rest), pulls SecLists, sets up the Reflection (SPINEL) virtualenv, creates `/opt/tentacles/`, writes a `.env`, and installs a `tentacles` systemd service. It skips anything already installed, so it's safe to re-run.
 
-### Step 3 — Add your API keys
+During setup it prompts you to choose a **login password** for the web UI. You can skip and edit `.env` later.
 
-```bash
-nano .env
-```
+### 3. Configuration
 
-**Required settings** (Tentacles won't start cleanly without these):
+The only settings you normally need are in `.env`:
 
-| Key | Purpose |
-|-----|---------|
-| `FRONTEND_PASSWORD` | Login password for the web UI |
-| `API_SECRET_KEY` | Protects the backend API (auto-generated by `run.sh`) |
-| `JWT_SECRET` | Session signing secret (auto-generated by `run.sh`) |
+| Setting | Purpose |
+|---------|---------|
+| `FRONTEND_PASSWORD` | Password the web UI lock screen asks for |
+| `API_SECRET_KEY` | Protects the backend API — auto-generated by `run.sh` |
+| `JWT_SECRET` | Session signing secret — auto-generated by `run.sh` |
+| `VPS_PUBLIC_IP` | Your server's public IP (auto-detected; set manually if needed) |
+| `PORT` | Backend port (default 4000) |
 
-**Important settings to change:**
+There are **no API keys to obtain** — Tentacles uses no external AI or paid services. The only optional credential is a GitHub Personal Access Token, which you enter per-sweep in the UI if you want the GitHub Recon stage to run.
 
-```bash
-VPS_PUBLIC_IP=YOUR_VPS_PUBLIC_IP    # Required for blind XSS callbacks
-FRONTEND_PASSWORD=choose_a_password  # Login password for the web UI
-API_SECRET_KEY=<auto-generated>      # Already set by run.sh
-```
-
-> Tentacles no longer uses any LLM/AI service — there are no API keys to obtain. It's a pure recon + tool-sweep platform.
-
-### Step 4 — Start Tentacles
+### 4. Start it
 
 ```bash
-# Permanent (runs on reboot):
+# Run as a service (starts on boot):
 systemctl enable --now tentacles
 
-# Dev mode (shows logs in terminal):
+# Or dev mode (logs in your terminal):
 npm run dev
 
-# Check it's running:
+# Health check:
 curl http://localhost:4000/api/health
 ```
 
-### Step 5 — Open the UI
+### 5. Open the UI
 
-Go to `http://YOUR_VPS_IP:5173` in your browser.
-
-Log in with the password you set in `FRONTEND_PASSWORD`.
+Go to `http://YOUR_SERVER_IP:5173` and log in with your `FRONTEND_PASSWORD`.
 
 ---
 
-## Running a session
+## Using it
 
-### 1. Configure the session
+1. **Create a workbench.** Click **+ New workbench**, enter a target domain (just the apex, e.g. `example.com`). Leave **Auto-run full sweep** checked for hands-off recon → sweep, or uncheck it to review recon first.
 
-In the UI, fill in:
+2. **Watch it run.** The dashboard shows a live status dot per workbench:
+   - blue = idle, yellow (pulsing) = recon running, yellow = recon done
+   - blue = sweep queued, green (pulsing) = sweep running, green = sweep done
+   - red = crashed
 
-- **Target domain** — e.g. `example.com` (just the domain, no https://)
-- **Platform** — HackerOne / Bugcrowd / Intigriti / YesWeHack / Custom
-- **Scope** — in-scope domains: `*.example.com, api.example.com`
-- **Out of scope** — `blog.example.com, status.example.com`
-- **App Description** ← **Most important field**. Write 2-3 paragraphs:
-  - What the app does and how it makes money
-  - Every flow involving money, credits, subscriptions, payouts
-  - User roles (buyer, seller, admin, premium, free, verified)
-  - Business rules ("sellers need 10 reviews before instant payout")
-  - Anything you noticed in the UI that felt like a complex rule
+   The right-hand **Activity** panel streams findings live as tools complete.
 
-The more specific your App Description, the better Tentacles's business logic tests.
+3. **Browse results.** Open a workbench to see:
+   - **Recon** — all recon data, viewable by subdomain or by category
+   - **Findings** — aggregated tool output (Nuclei hits, FFUF results, JS secrets, etc.)
+   - **Tool Runs** — per-tool run history and status
+   - **Overview** — launch additional tools, run another sweep, export
 
-### 2. Configure authentication (recommended)
+4. **Run a sweep manually** any time recon is done — the 🚀 Sweep button on the card, or the sweep panel inside the workbench. Pick aggression (polite / standard / heavy), stealth on/off, and speed.
 
-Under **Auth Config**, add your session cookie or Bearer token for the test account.
+5. **Export.** The Export panel zips up recon, findings, tool runs, and optionally the site-mirror data for offline review.
 
-Under **Victim Auth** (optional but high-value), add a second account's session for IDOR testing.
-
-### 3. Start the session
-
-Click **Start**. Session runs for 45-90 minutes depending on target complexity.
-
-### 4. Review reports
-
-Reports appear in the **Reports** tab as findings are confirmed. Each includes:
-- Severity and CVSS score with full vector string
-- Steps to reproduce
-- Working curl PoC (re-validated before report is written)
-- Platform-formatted submission text
-- Triage quality score (A/B/C/F) — review anything below B before submitting
-
-**Always test the PoC yourself before submitting.** Tentacles marks findings with `pocValidationNote` if re-validation was inconclusive.
-
----
-
-## Session configuration tips
-
-**Get more findings per session:**
-
-1. Write a detailed App Description every session — this is the single most impactful thing
-2. Configure victim auth for two-account IDOR testing
-3. Enable "Premium Model" for complex targets on high-paying programs
-4. Run a second session on the same target — the KB learns from the first, return visits find more
-5. Add programs to the Queue for overnight batch runs
-
-**For specific target types:**
-
-- **SaaS** — describe subscription tiers and what premium features grant
-- **Marketplace** — describe the seller/buyer flow, escrow rules, payout conditions
-- **Fintech** — describe transfer limits, verification requirements, payout delays
-- **Enterprise** — add auth cookie from an account with limited privileges
+6. **Archive** finished workbenches to keep the dashboard tidy (📦 Archive on the card; toggle **Show archived** to see them again).
 
 ---
 
@@ -157,13 +135,12 @@ Reports appear in the **Reports** tab as findings are confirmed. Each includes:
 
 ```
 /opt/tentacles/
-  reports/          ← All confirmed findings with PoC
-  workspace/        ← Tool outputs per session
-  recon_output/     ← Recon script outputs
-  knowledge_base.json  ← Cross-session learning
-  state.json        ← Session state
-  nuclei-templates/ ← Auto-generated templates from confirmed findings
+  workbenches/      <- per-workbench recon, tool output, findings, exports
+  forensics/        <- per-run execution logs (best-effort)
+  default-credentials.json   <- optional, for authenticated tool runs (mode 0600)
 ```
+
+Each workbench directory holds its recon flat files, a `recon_summary.json`, the static brief, per-tool output folders, and the sweep state.
 
 ---
 
@@ -172,7 +149,7 @@ Reports appear in the **Reports** tab as findings are confirmed. Each includes:
 ```bash
 systemctl start tentacles      # Start
 systemctl stop tentacles       # Stop
-systemctl restart tentacles    # Restart after config changes
+systemctl restart tentacles    # Restart after editing .env
 systemctl status tentacles     # Check status
 journalctl -u tentacles -f     # Live logs
 ```
@@ -183,26 +160,29 @@ journalctl -u tentacles -f     # Live logs
 
 ```bash
 cd /path/to/tentacles-backend
-# Upload new Tentacles.tar, then:
-tar -xf Tentacles.tar --strip-components=1
+# Upload the new Tentacles.tar.gz, then:
+tar -xzf Tentacles.tar.gz --strip-components=1
 npm install
 cd frontend && npm install && cd ..
 systemctl restart tentacles
 ```
 
+Your existing workbench data lives under `/opt/tentacles/` and is not touched by an update.
+
 ---
 
 ## Troubleshooting
 
-**UI won't load:** Check `systemctl status tentacles` and make sure port 5173 is open in your firewall.
+**UI won't load** — Check `systemctl status tentacles` and confirm port 5173 is open in your firewall (`ufw allow 5173/tcp`).
 
-**Session starts but finds nothing:** Make sure the target is in scope, auth is configured if the app requires login, and VPS_PUBLIC_IP is set correctly.
+**A tool reports "not installed" or a sweep stage skips** — Re-run `bash run.sh`; it reinstalls anything that failed the first time. s3scanner in particular can fail on some Python builds — if it does, the Cloud Buckets stage simply skips and the rest of the sweep continues.
 
-**Tools missing:** Re-run `bash run.sh` to install any tools that failed the first time.
+**Reflection stage fails** — The SPINEL venv may be missing dependencies. Fix:
+`tools/reflection/.venv/bin/pip install -r tools/reflection/requirements.txt`
 
-**Tools not found:** Re-run `bash scripts/setup.sh` — it skips already-installed tools.
+**gowitness produces 0 screenshots** — Chromium isn't installed. `apt install -y chromium-browser`, then re-run the sweep.
 
-**Blind XSS callbacks not working:** Make sure `VPS_PUBLIC_IP` is set in `.env` and port 7331 is open (`ufw allow 7331/tcp`).
+**Sweep fails with "No space left on device"** — Free disk: `apt-get clean && rm -rf /root/.cache/pip /tmp/* && journalctl --vacuum-size=50M`. Site-mirror data is the usual culprit; delete old workbenches you no longer need.
 
 ---
 
@@ -211,26 +191,31 @@ systemctl restart tentacles
 ```
 tentacles-backend/
   src/
-    agent/
-      agentEngine.js        — Main orchestration loop
-      appComprehension.js   — Application model builder
-      workflowTester.js     — Business logic test suites (50+)
-      customBLTester.js     — Custom BL (trial, loyalty, voucher, etc.)
-      advancedTester.js     — Technical suites (SSTI, XXE, OAuth, etc.)
-      exploitDepth.js       — Post-confirmation evidence deepening
-      signalTracker.js      — Partial signal follow-up
-      responseVariation.js  — Auth-level response comparison
-      secondOrder.js        — Second-order injection
-      shodanRecon.js        — Internet scan data
-      knowledgeBase.js      — Cross-session learning
-      chainCorrelator.js    — Finding chain detection
-      planner.js            — (legacy, unused)
-      reportGenerator.js    — Platform-formatted reports
-    tools/executor.js       — 60+ security tool wrappers
-    api/routes.js           — REST API
-    state/stateManager.js   — Session state
-  frontend/src/App.jsx      — React UI
-  scripts/
-    setup.sh                — VPS installer
-    recon.sh                — 12-phase recon script
+    workbench/
+      reconStreamer.js     - runs baseline recon, streams progress, auto-queues sweep
+      reconAdapter.js      - builds recon summary + static brief
+      reconPhase.js        - phase tracking
+      reconDeepen.js       - focused second-pass recon (JS, forms, schemas)
+      sweepPipeline.js     - 13-stage Full Tool Sweep
+      sweepQueue.js        - global cap-3 concurrency queue
+      tools.js             - individual tool runners
+      toolsRegistry.js     - tool definitions + default options
+      stealthProfile.js    - user-agent rotation + rate presets
+      hostHealth.js        - adaptive backoff on rate-limited hosts
+      subdomainPivot.js    - per-subdomain result view
+      exporter.js          - workbench zip export
+      sessionStore.js      - workbench manifests + persistence
+      wsHandler.js         - read-only live activity stream
+      chatEngine.js        - broadcast layer for the activity stream
+      routes.js            - REST API
+    tools/executor.js      - low-level tool execution
+    api/routes.js          - auth + health
+    server.js              - entry point
+  frontend/src/
+    App.jsx                - dashboard (workbench list, create, sweep, archive)
+    Workbench.jsx          - single-workbench view (recon, findings, tools, export)
+    WorkbenchShell.jsx     - layout shell + sidebar + tabs
+    TentaclesLogo.jsx      - logo
+  recon/retrox-recon.sh    - 6-phase recon script
+  run.sh                   - installer + systemd setup
 ```
