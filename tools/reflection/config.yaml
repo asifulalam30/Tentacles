@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Reflection Scanner — configuration
+# Author: Asiful
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Proxy (optional) ──────────────────────────────────────────────────────────
+# Default: null (no proxy — direct connections, VPS-ready)
+# To intercept traffic in Burp/ZAP, set to your proxy URL:
+#   proxy: "http://127.0.0.1:8080"
+proxy: null
+
+# ── Network ───────────────────────────────────────────────────────────────────
+timeout: 10                 # seconds per request (1–120)
+verify_tls: true            # set false for self-signed cert environments
+follow_redirects: true
+
+# ── Concurrency & pacing ──────────────────────────────────────────────────────
+max_workers: 3              # total thread-pool workers (1–20)
+max_per_host: 2             # max concurrent requests to any single host (1–max_workers)
+delay_min: 0.8              # minimum inter-request sleep (seconds)
+delay_max: 2.0              # maximum inter-request sleep (seconds)
+retries: 2                  # retry attempts on transient errors (0–10)
+
+# ── Host protection ───────────────────────────────────────────────────────────
+throttle_on_status:         # transient back-off (host paused 15s)
+  - 429
+  - 503
+
+block_on_status:            # hard block after block_threshold consecutive hits
+  - 403
+
+block_threshold: 5
+
+# ── Payload marker ────────────────────────────────────────────────────────────
+marker_prefix: "SPINEL"     # 1–20 alphanumeric chars, starts with a letter
+
+# ── HTTP methods ──────────────────────────────────────────────────────────────
+methods:
+  - GET
+  - POST
+
+# ── Injection surfaces ────────────────────────────────────────────────────────
+test_points:
+  - query
+  - headers
+  - cookies
+  - form
+  - json
+
+# ── Baseline ─────────────────────────────────────────────────────────────────
+baseline_enabled: true      # send a clean GET per target before injection
+
+# ── Default request headers ───────────────────────────────────────────────────
+default_headers:
+  Accept: "*/*"
+  Accept-Language: "en-US,en;q=0.9"
+
+# ── Reflection detection ──────────────────────────────────────────────────────
+reflection:
+  check_body: true
+  check_headers: true
+  snippet_radius: 60        # characters to capture on each side of a match
+
+# ── Runtime limit ─────────────────────────────────────────────────────────────
+max_runtime_secs: 0         # 0 = unlimited; e.g. 3600 for a 1-hour cutoff
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_dir: "output"
